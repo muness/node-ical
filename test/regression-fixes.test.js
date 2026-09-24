@@ -519,4 +519,66 @@ describe('regression fixes', () => {
       assert.equal(occurrence.getMilliseconds(), 0);
     }
   });
+
+  it('parses and expands VALUE=DATE events with years below 1000 (zero-padded 4DIGIT, obsidian-ics#263)', () => {
+    // RFC 5545 defines date-fullyear as exactly 4DIGIT (0000-9999), so
+    // "09350928" is a valid all-day date. Before the fix, buildDateOnlyStamp()
+    // re-serialized the parsed Date with an un-padded year (String(935) ->
+    // "935"), producing a 7-char stamp "9350928" that rrule-temporal re-split
+    // at fixed 4/2/2 positions into "9350-92-8", throwing
+    // RangeError: Cannot parse: 9350-92-8 and dropping the whole calendar.
+    //
+    // NOTE: years 0-99 are intentionally NOT covered here. They hit a separate
+    // 2-digit-year quirk inside rrule-temporal (its expansion remaps year 1 to
+    // 1901), which is outside node-ical's control and tracked separately.
+    const previousTZ = process.env.TZ;
+    process.env.TZ = 'Etc/UTC';
+
+    const parseDateOnlyYearly = year => ical.parseICS([
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      `PRODID:-//TEST//date-only-${year}//EN`,
+      'BEGIN:VEVENT',
+      `UID:date-only-${year}@test`,
+      'DTSTAMP:20250101T000000Z',
+      `DTSTART;VALUE=DATE:${year}0928`,
+      'RRULE:FREQ=YEARLY',
+      `SUMMARY:All-day event in ${year}`,
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n'));
+
+    try {
+      // 0100/0935/0999 are the adversarial low years (they fail without the
+      // fix); 1000/9999 are sanity checks that normal years still work.
+      for (const year of ['0100', '0935', '0999', '1000', '9999']) {
+        const parsed = parseDateOnlyYearly(year);
+        const event = findFirstVevent(parsed);
+        assert.ok(event, `event for year ${year} should exist`);
+
+        const lowYear = Number(year);
+        assert.equal(event.start.getFullYear(), lowYear, `year ${year} should round-trip`);
+        assert.equal(event.start.getMonth(), 8, `month for ${year} should be September`);
+        assert.equal(event.start.getDate(), 28, `day for ${year} should be 28`);
+        assert.equal(event.start.dateOnly, true, `year ${year} should be date-only`);
+
+        // Recurrence expansion must work for the original (low) year too.
+        const occurrences = event.rrule.between(
+          new Date(Date.UTC(lowYear, 0, 1)),
+          new Date(Date.UTC(lowYear + 1, 0, 1)),
+          true,
+        );
+        assert.equal(occurrences.length, 1, `year ${year} should expand to one yearly occurrence`);
+        assert.equal(occurrences[0].getFullYear(), lowYear, `occurrence year for ${year}`);
+        assert.equal(occurrences[0].getMonth(), 8, `occurrence month for ${year}`);
+        assert.equal(occurrences[0].getDate(), 28, `occurrence day for ${year}`);
+      }
+    } finally {
+      if (previousTZ === undefined) {
+        delete process.env.TZ;
+      } else {
+        process.env.TZ = previousTZ;
+      }
+    }
+  });
 });
